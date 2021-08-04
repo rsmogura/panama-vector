@@ -778,10 +778,10 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
   const TypePtr *addr_type = gvn().type(addr)->isa_ptr();
   const TypeAryPtr* arr_type = addr_type->isa_aryptr();
 
-  if (arr_type == NULL && !off_heap_access) {
-    // Load or store to something different than array? Or just can't determine array type?
-    mismatched_array = true;
-  }
+  // if (arr_type == NULL && !off_heap_access) {
+  //   // Load or store to something different than array? Or just can't determine array type?
+  //   mismatched_array = true;
+  // }
 
   // Now handle special case where load/store happens from/to byte array but element type is not byte.
   bool using_byte_array = arr_type != NULL && arr_type->elem()->array_element_basic_type() == T_BYTE && elem_bt != T_BYTE;
@@ -841,10 +841,17 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
   const TypeInstPtr* vbox_type = TypeInstPtr::make_exact(TypePtr::NotNull, vbox_klass);
   const bool needs_bar = mixed_access || mismatched_array;
 
-  if (needs_bar) {
-    insert_mem_bar(Op_MemBarCPUOrder);
-  }
+  // if (needs_bar) {
+  //   insert_mem_bar(Op_MemBarCPUOrder);
+  // }
 
+  // TODO Hack to get base type...
+  const TypePtr *mixed_type = NULL;
+  if (mixed_access) {
+    // Node *dummy_base = must_be_not_null(base, true);
+    // mixed_type = gvn().type(basic_plus_adr(base, offset))->is_ptr();
+    mixed_type = TypeAryPtr::BYTES;
+  }
   if (is_store) {
     Node* val = unbox_vector(argument(6), vbox_type, elem_bt, num_elem);
     if (val == NULL) {
@@ -862,24 +869,34 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
       val = gvn().transform(new VectorReinterpretNode(val, val->bottom_type()->is_vect(), to_vect_type));
     }
 
-    Node* vstore = gvn().transform(StoreVectorNode::make(0, control(), memory(addr), addr, addr_type, val, store_num_elem));
-    set_memory(vstore, addr_type);
+    Node* vstore = gvn().transform(StoreVectorNode::make(0, control(),
+      mixed_access ? merged_memory(): memory(addr),
+      addr, addr_type, val, store_num_elem));
+
+    if (mixed_access) {
+      set_memory(vstore, Compile::AliasIdxRaw);
+      set_memory(vstore, mixed_type); // TODO Optimize this line, for test assume BYTES
+    } else {
+      set_memory(vstore, addr_type);
+    }
   } else {
     // When using byte array, we need to load as byte then reinterpret the value. Otherwise, do a simple vector load.
     Node* vload = NULL;
+    Node* mem = mixed_access ? merged_memory() : memory(addr);
+
     if (using_byte_array) {
       int load_num_elem = num_elem * type2aelembytes(elem_bt);
-      vload = gvn().transform(LoadVectorNode::make(0, control(), memory(addr), addr, addr_type, load_num_elem, T_BYTE));
+      vload = gvn().transform(LoadVectorNode::make(0, control(), mem, addr, addr_type, load_num_elem, T_BYTE));
       const TypeVect* to_vect_type = TypeVect::make(elem_bt, num_elem);
       vload = gvn().transform(new VectorReinterpretNode(vload, vload->bottom_type()->is_vect(), to_vect_type));
     } else {
       // Special handle for masks
       if (is_mask) {
-        vload = gvn().transform(LoadVectorNode::make(0, control(), memory(addr), addr, addr_type, num_elem, T_BOOLEAN));
+        vload = gvn().transform(LoadVectorNode::make(0, control(), mem, addr, addr_type, num_elem, T_BOOLEAN));
         const TypeVect* to_vect_type = TypeVect::make(elem_bt, num_elem);
         vload = gvn().transform(new VectorLoadMaskNode(vload, to_vect_type));
       } else {
-        vload = gvn().transform(LoadVectorNode::make(0, control(), memory(addr), addr, addr_type, num_elem, elem_bt));
+        vload = gvn().transform(LoadVectorNode::make(0, control(), mem, addr, addr_type, num_elem, elem_bt));
       }
     }
     Node* box = box_vector(vload, vbox_type, elem_bt, num_elem);
@@ -888,9 +905,9 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
 
   old_map->destruct(&_gvn);
 
-  if (needs_bar) {
-    insert_mem_bar(Op_MemBarCPUOrder);
-  }
+  // if (needs_bar) {
+  //   insert_mem_bar(Op_MemBarCPUOrder);
+  // }
 
   C->set_max_vector_size(MAX2(C->max_vector_size(), (uint)(num_elem * type2aelembytes(elem_bt))));
   return true;
