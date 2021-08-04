@@ -870,10 +870,12 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
     }
 
     Node* vstore = gvn().transform(StoreVectorNode::make(0, control(),
-      mixed_access ? merged_memory(): memory(addr),
-      addr, addr_type, val, store_num_elem));
+      mixed_access ? merged_memory()->base_memory(): memory(addr), // Mixed mode
+      addr,
+      mixed_access ? TypePtr::BOTTOM : addr_type, // Mixed mode
+      val, store_num_elem));
 
-    if (mixed_access) {
+    if (mixed_access) { // Mixed mode
       set_memory(vstore, Compile::AliasIdxRaw);
       set_memory(vstore, mixed_type); // TODO Optimize this line, for test assume BYTES
     } else {
