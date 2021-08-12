@@ -1739,4 +1739,50 @@ public:
   virtual const Type *bottom_type() const { return ( AllocatePrefetchStyle == 3 ) ? Type::MEMORY : Type::ABIO; }
 };
 
+// Used to optimize loads. Sometimes load sees bot memory behind chain of
+// mem merges and phis, even if the memory chain (or whole method) does not effectively modifies node slice.
+// In such a case load can be narrowed to unique in memory.
+// It's like spliting out phi, but focuses on fast searching of unique input memory.
+// Helpful for loop invariants.
+class LoadOptimize : public ResourceObj {
+private:
+  PhaseIterGVN* phase;
+  Unique_Node_List worklist;
+  VectorSet visited;
+
+  // Number of distinct nodes
+  int in_count;
+  Node* in_nodes;
+
+  bool test_push_node(Node *n) {
+    if (!visited.test_set(n->_idx)) {
+      worklist.push(n);
+      return false;
+    }
+
+    return true;
+  }
+
+  inline bool add_phi_inputs_to_worklist(PhiNode *phi);
+
+  void add_input(Node *n) {
+    if (in_nodes != n) {
+      in_nodes = n;
+      in_count++;
+    }
+  }
+
+  void reset() {
+    worklist.clear();
+    visited.clear();
+    in_count = 0;
+    in_nodes = NULL;
+  }
+public:
+  LoadOptimize(PhaseIterGVN* phase) : phase(phase) {}
+  Node* optimize_unique_in_memory(Node *n);
+
+  static void optimize(PhaseIterGVN &igvn);
+};
+
 #endif // SHARE_OPTO_MEMNODE_HPP
