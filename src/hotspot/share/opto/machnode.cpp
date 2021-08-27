@@ -380,6 +380,9 @@ const class TypePtr *MachNode::adr_type() const {
   if (tp == NULL) {
     assert(false, "this path may produce not optimal code");
     return TypePtr::BOTTOM;
+  } else if (tp == TypePtr::BOTTOM) {
+    // Mixed mode access?
+    return tp;
   }
   assert(tp->base() != Type::AnyPtr, "not a bare pointer");
 

@@ -389,8 +389,9 @@ Node *MemNode::Ideal_common(PhaseGVN *phase, bool can_reshape) {
   if (mem->is_MergeMem()) {
     MergeMemNode* mmem = mem->as_MergeMem();
     const TypePtr *tp = t_adr->is_ptr();
-
-    mem = step_through_mergemem(phase, mmem, tp, adr_type(), tty);
+    if (tp != TypePtr::BOTTOM) {
+      mem = step_through_mergemem(phase, mmem, tp, adr_type(), tty);
+    }
   }
 
   if (mem != old_mem) {
