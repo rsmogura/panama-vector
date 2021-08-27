@@ -943,7 +943,7 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
 
   const bool is_mismatched_access = in_heap && (addr_type->isa_aryptr() == NULL);
 
-  const bool needs_cpu_membar = is_mixed_access || is_mismatched_access;
+  const bool needs_cpu_membar = is_mismatched_access;
 
   // Now handle special case where load/store happens from/to byte array but element type is not byte.
   bool using_byte_array = arr_type != NULL && arr_type->elem()->array_element_basic_type() == T_BYTE && elem_bt != T_BYTE;
@@ -1023,7 +1023,21 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
       val = gvn().transform(new VectorReinterpretNode(val, val->bottom_type()->is_vect(), to_vect_type));
     }
 
-    Node* vstore = gvn().transform(StoreVectorNode::make(0, control(), memory(addr), addr, addr_type, val, store_num_elem));
+    Node* mem_in = is_mixed_access ? reset_memory() : memory(addr);
+    Node* vstore = gvn().transform(StoreVectorNode::make(0, control(),
+      mem_in,
+      is_mixed_access ? gvn().transform(new CheckCastPPNode(control(), addr, TypePtr::BOTTOM)) : addr,
+      is_mixed_access ? TypePtr::BOTTOM : addr_type,
+      val, store_num_elem));
+    if (is_mixed_access) {
+      set_all_memory(mem_in); //resetted memory
+      // Create dummy on heap address just to pull out alias
+      Node *dummy_addr = basic_plus_adr(base, offset);
+      const TypePtr *dummy_ptr = gvn().type(dummy_addr)->is_ptr();
+      assert(dummy_ptr->isa_aryptr(), "Expected array for vectors, maybe other day with...");
+      assert(addr_type == TypeRawPtr::BOTTOM, "Second address should be raw");
+      set_memory(vstore, dummy_ptr); // Raw address will be updated in later
+    }
     set_memory(vstore, addr_type);
   } else {
     // When using byte array, we need to load as byte then reinterpret the value. Otherwise, do a simple vector load.
@@ -1039,7 +1053,14 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
         vload = gvn().transform(LoadVectorNode::make(0, control(), memory(addr), addr, addr_type, num_elem, T_BOOLEAN));
         vload = gvn().transform(new VectorLoadMaskNode(vload, TypeVect::makemask(elem_bt, num_elem)));
       } else {
-        vload = gvn().transform(LoadVectorNode::make(0, control(), memory(addr), addr, addr_type, num_elem, elem_bt));
+        vload = gvn().transform(LoadVectorNode::make(0, control(),
+          is_mixed_access ? merged_memory() : memory(addr),
+          is_mixed_access ? gvn().transform(new CheckCastPPNode(control(), addr, TypePtr::BOTTOM)) : addr,
+          is_mixed_access ? TypePtr::BOTTOM : addr_type,
+          num_elem, elem_bt));
+        // if (is_mixed_access) {
+        //    set_all_memory(reset_memory());
+        // }
       }
     }
     Node* box = box_vector(vload, vbox_type, elem_bt, num_elem);
