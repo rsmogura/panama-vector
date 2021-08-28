@@ -138,14 +138,14 @@ extern void print_alias_types();
 
 #endif
 
-Node *MemNode::optimize_simple_memory_chain(Node *mchain, const TypeOopPtr *t_oop, Node *load, PhaseGVN *phase) {
-  assert((t_oop != NULL), "sanity");
+Node *MemNode::optimize_simple_memory_chain(Node *mchain, const TypePtr *t_ptr, Node *load, PhaseGVN *phase) {
+  assert((t_ptr != NULL), "sanity");
   bool is_instance = t_oop->is_known_instance_field();
   bool is_boxed_value_load = t_oop->is_ptr_to_boxed_value() &&
                              (load != NULL) && load->is_Load() &&
                              (phase->is_IterGVN() != NULL);
-  if (!(is_instance || is_boxed_value_load))
-    return mchain;  // don't try to optimize non-instance types
+  bool is_instace_or_boxed = is_instance || is_boxed_value_load;                
+
   uint instance_id = t_oop->instance_id();
   Node *start_mem = phase->C->start()->proj_out_or_null(TypeFunc::Memory);
   Node *prev = NULL;
@@ -155,7 +155,7 @@ Node *MemNode::optimize_simple_memory_chain(Node *mchain, const TypeOopPtr *t_oo
     if (result == start_mem)
       break;  // hit one of our sentinels
     // skip over a call which does not affect this memory slice
-    if (result->is_Proj() && result->as_Proj()->_con == TypeFunc::Memory) {
+    if (is_instace_or_boxed && result->is_Proj() && result->as_Proj()->_con == TypeFunc::Memory) {
       Node *proj_in = result->in(0);
       if (proj_in->is_Allocate() && proj_in->_idx == instance_id) {
         break;  // hit one of our sentinels
@@ -190,7 +190,7 @@ Node *MemNode::optimize_simple_memory_chain(Node *mchain, const TypeOopPtr *t_oo
       } else {
         assert(false, "unexpected projection");
       }
-    } else if (result->is_ClearArray()) {
+    } else if (is_instace_or_boxed && result->is_ClearArray()) {
       if (!is_instance || !ClearArrayNode::step_through(&result, instance_id, phase)) {
         // Can not bypass initialization of the instance
         // we are looking for.
@@ -1482,7 +1482,7 @@ Node* LoadNode::eliminate_autobox(PhaseIterGVN* igvn) {
   return NULL;
 }
 
-static bool stable_phi(PhiNode* phi, PhaseGVN *phase) {
+bool PhiNode::stable_phi(PhiNode* phi, PhaseGVN *phase) {
   Node* region = phi->in(0);
   if (region == NULL) {
     return false; // Wait stable graph
@@ -1523,7 +1523,7 @@ Node *LoadNode::split_through_phi(PhaseGVN *phase) {
   }
 
   if (mem->is_Phi()) {
-    if (!stable_phi(mem->as_Phi(), phase)) {
+    if (!PhiNode::stable_phi(mem->as_Phi(), phase)) {
       return NULL; // Wait stable graph
     }
     uint cnt = mem->req();
@@ -1548,7 +1548,7 @@ Node *LoadNode::split_through_phi(PhaseGVN *phase) {
     }
   }
   if (base_is_phi) {
-    if (!stable_phi(base->as_Phi(), phase)) {
+    if (!PhiNode::stable_phi(base->as_Phi(), phase)) {
       return NULL; // Wait stable graph
     }
     uint cnt = base->req();
@@ -1776,6 +1776,15 @@ Node *LoadNode::Ideal(PhaseGVN *phase, bool can_reshape) {
       if (t_oop->is_ptr_to_boxed_value()) {
         Node* result = eliminate_autobox(igvn);
         if (result != NULL) return result;
+      }
+    } else if (mem->is_Phi() && mem->adr_type() == TypePtr::BOTTOM) {
+      // Split source Phi, Phi transformations will propagate split
+      PhaseIterGVN *igvn = phase->is_IterGVN();
+      PhiNode *sliced_phi = mem->as_Phi()->split_out_address_type(addr_t, igvn);
+      if (sliced_phi != NULL) {
+        igvn->_worklist.push(sliced_phi);
+        set_req_X(MemNode::Memory, sliced_phi, phase);
+        return this;
       }
     }
   }

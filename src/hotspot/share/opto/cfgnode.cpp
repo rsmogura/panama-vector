@@ -1031,6 +1031,76 @@ PhiNode* PhiNode::split_out_instance(const TypePtr* at, PhaseIterGVN *igvn) cons
   return nphi;
 }
 
+PhiNode *PhiNode::split_out_address_type(const TypePtr* addr_t, PhaseIterGVN *igvn) {
+  if (type() == Type::MEMORY && adr_type() == TypePtr::BOTTOM && PhiNode::stable_phi(this, igvn)) {
+      // Check if an appropriate node already exists.
+      Node *region = in(0);
+      for (DUIterator_Fast kmax, k = region->fast_outs(kmax); k < kmax; k++) {
+        Node* use = region->fast_out(k);
+        if( use->is_Phi()) {
+          PhiNode *phi2 = use->as_Phi();
+          if (phi2->type() == Type::MEMORY && phi2->adr_type() == at) {
+            return phi2;
+          }
+        }
+      }
+      Compile *C = igvn->C;
+      Arena *a = Thread::current()->resource_area();
+      Node_Array node_map = new Node_Array(a);
+      Node_Stack stack(a, C->live_nodes() >> 4);
+      PhiNode *nphi = slice_memory(at);
+      igvn->register_new_node_with_optimizer( nphi );
+      node_map.map(_idx, nphi);
+      stack.push((Node *)this, 1);
+      while(!stack.is_empty()) {
+        PhiNode *ophi = stack.node()->as_Phi();
+        uint i = stack.index();
+        assert(i >= 1, "not control edge");
+        stack.pop();
+        nphi = node_map[ophi->_idx]->as_Phi();
+        for (; i < ophi->req(); i++) {
+          Node *in = ophi->in(i);
+          if (in == NULL || igvn->type(in) == Type::TOP)
+            continue;
+          Node *opt = MemNode::optimize_simple_memory_chain(in, addr_t, NULL, igvn);
+          PhiNode *optphi = opt->is_Phi() ? opt->as_Phi() : NULL;
+          if (optphi != NULL && optphi->adr_type() == TypePtr::BOTTOM) {
+            opt = node_map[optphi->_idx];
+            if (opt == NULL) {
+              stack.push(ophi, i);
+              nphi = optphi->slice_memory(at);
+              igvn->register_new_node_with_optimizer( nphi );
+              node_map.map(optphi->_idx, nphi);
+              ophi = optphi;
+              i = 0; // will get incremented at top of loop
+              continue;
+            }
+          }
+          nphi->set_req(i, opt);
+        }
+      }
+      return nphi;
+//     PhiNode *sliced_phi = find_simillar_by_adr_type(addr_t);
+//     if (sliced_phi == NULL) {
+//       // Try to prevent inifinite loops when splitting Phis, it should not happen but can
+//       // This is top-notch, ultimate state & state of art, and we don't have to maintain maps
+//       if (split_count++ > igvn->C->num_alias_types() * 2) {
+// #ifdef ASSERT     
+//         igvn->C->print_method(PHASE_DEBUG, 1);
+//         assert(false, "Split count suspicious large, infinite loop?");
+// #endif      
+//         return NULL;
+//       }
+
+//       sliced_phi = slice_memory(addr_t);
+//       igvn->register_new_node_with_optimizer(sliced_phi);
+//       // sliced_phi->dump(1);
+//     }
+//     return sliced_phi;
+  }
+  return NULL;
+}
+
 //------------------------verify_adr_type--------------------------------------
 #ifdef ASSERT
 void PhiNode::verify_adr_type(VectorSet& visited, const TypePtr* at) const {
@@ -1380,7 +1450,7 @@ Node* PhiNode::Identity(PhaseGVN* phase) {
     for (DUIterator_Fast imax, i = phi_reg->fast_outs(imax); i < imax; i++) {
       Node* u = phi_reg->fast_out(i);
       if (u->is_Phi() && u->as_Phi()->type() == Type::MEMORY &&
-          u->adr_type() == TypePtr::BOTTOM && u->in(0) == phi_reg &&
+          u->adr_type() == adr_type() && u->in(0) == phi_reg &&
           u->req() == phi_len) {
         for (uint j = 1; j < phi_len; j++) {
           if (in(j) != u->in(j)) {
@@ -2184,149 +2254,39 @@ Node *PhiNode::Ideal(PhaseGVN *phase, bool can_reshape) {
     }
   }
 
-  // Split phis through memory merges, so that the memory merges will go away.
-  // Piggy-back this transformation on the search for a unique input....
-  // It will be as if the merged memory is the unique value of the phi.
-  // (Do not attempt this optimization unless parsing is complete.
-  // It would make the parser's memory-merge logic sick.)
-  // (MergeMemNode is not dead_loop_safe - need to check for dead loop.)
-  if (progress == NULL && can_reshape && type() == Type::MEMORY) {
-    // see if this phi should be sliced
-    uint merge_width = 0;
-    bool saw_self = false;
-    for( uint i=1; i<req(); ++i ) {// For all paths in
-      Node *ii = in(i);
-      // TOP inputs should not be counted as safe inputs because if the
-      // Phi references itself through all other inputs then splitting the
-      // Phi through memory merges would create dead loop at later stage.
-      if (ii == top) {
-        return NULL; // Delay optimization until graph is cleaned.
-      }
-      if (ii->is_MergeMem()) {
-        MergeMemNode* n = ii->as_MergeMem();
-        merge_width = MAX2(merge_width, n->req());
-        saw_self = saw_self || (n->base_memory() == this);
-      }
-    }
-
-    // This restriction is temporarily necessary to ensure termination:
-    if (!saw_self && adr_type() == TypePtr::BOTTOM)  merge_width = 0;
-
-    if (merge_width > Compile::AliasIdxRaw) {
-      // found at least one non-empty MergeMem
-      const TypePtr* at = adr_type();
-      if (at != TypePtr::BOTTOM) {
-        // Patch the existing phi to select an input from the merge:
-        // Phi:AT1(...MergeMem(m0, m1, m2)...) into
-        //     Phi:AT1(...m1...)
-        int alias_idx = phase->C->get_alias_index(at);
-        for (uint i=1; i<req(); ++i) {
-          Node *ii = in(i);
-          if (ii->is_MergeMem()) {
-            MergeMemNode* n = ii->as_MergeMem();
-            // compress paths and change unreachable cycles to TOP
-            // If not, we can update the input infinitely along a MergeMem cycle
-            // Equivalent code is in MemNode::Ideal_common
-            Node *m  = phase->transform(n);
-            if (outcnt() == 0) {  // Above transform() may kill us!
-              return top;
-            }
-            // If transformed to a MergeMem, get the desired slice
-            // Otherwise the returned node represents memory for every slice
-            Node *new_mem = (m->is_MergeMem()) ?
-                             m->as_MergeMem()->memory_at(alias_idx) : m;
-            // Update input if it is progress over what we have now
-            if (new_mem != ii) {
-              set_req_X(i, new_mem, phase->is_IterGVN());
-              progress = this;
-            }
-          }
+  if (progress == NULL && can_reshape && type() == Type::MEMORY && adr_type() != TypePtr::BOTTOM) {
+    PhaseIterGVN *igvn = phase->is_IterGVN();
+    for( uint i = MemNode::Control + 1;  i< req(); ++i ) {// For all paths in
+      Node *mem = in(i);
+      if (mem->is_Phi() && mem->adr_type() == TypePtr::BOTTOM) {
+        PhiNode *sliced_phi = mem->as_Phi()->split_out_address_type(adr_type(), igvn);
+        if (sliced_phi != NULL) {
+          igvn->_worklist.push(sliced_phi);
+          set_req_X(i, sliced_phi, phase);
+          progress = this;
         }
-      } else {
-        // We know that at least one MergeMem->base_memory() == this
-        // (saw_self == true). If all other inputs also references this phi
-        // (directly or through data nodes) - it is a dead loop.
-        bool saw_safe_input = false;
-        for (uint j = 1; j < req(); ++j) {
-          Node* n = in(j);
-          if (n->is_MergeMem()) {
-            MergeMemNode* mm = n->as_MergeMem();
-            if (mm->base_memory() == this || mm->base_memory() == mm->empty_memory()) {
-              // Skip this input if it references back to this phi or if the memory path is dead
-              continue;
-            }
+      } else if (mem->is_MergeMem()) {
+        MergeMemNode *merge_mem = mem->as_MergeMem();
+        Node *better_mem = merge_mem->memory_at(phase->C->get_alias_index(adr_type()));
+
+        // Replace slice inside merge mem, without it infinite loop can happen.
+        // In fact any step throught any node to BOT phi can cause infinite loop
+        // Phi #1 -> MemMerge or other node -> Phi #1
+        // Split Phi #1 -> MemMerge or other node -> Phi #1
+        //       MemMereg or other node -> Phi #2
+        //       Phi #1 -> Phi #2 (Phi #2 triggerse split of Phi #1 and loop)
+        if (better_mem->is_Phi()) {
+          PhiNode *sliced_phi = better_mem->as_Phi()->split_out_address_type(adr_type(), igvn);
+          if (sliced_phi != NULL) {
+            igvn->_worklist.push(sliced_phi);
+            better_mem = sliced_phi;
+            merge_mem->set_memory_at(phase->C->get_alias_index(adr_type()), better_mem);
           }
-          if (!is_unsafe_data_reference(n)) {
-            saw_safe_input = true; // found safe input
-            break;
-          }
-        }
-        if (!saw_safe_input) {
-          // There is a dead loop: All inputs are either dead or reference back to this phi
-          return top;
         }
 
-        // Phi(...MergeMem(m0, m1:AT1, m2:AT2)...) into
-        //     MergeMem(Phi(...m0...), Phi:AT1(...m1...), Phi:AT2(...m2...))
-        PhaseIterGVN* igvn = phase->is_IterGVN();
-        Node* hook = new Node(1);
-        PhiNode* new_base = (PhiNode*) clone();
-        // Must eagerly register phis, since they participate in loops.
-        if (igvn) {
-          igvn->register_new_node_with_optimizer(new_base);
-          hook->add_req(new_base);
-        }
-        MergeMemNode* result = MergeMemNode::make(new_base);
-        for (uint i = 1; i < req(); ++i) {
-          Node *ii = in(i);
-          if (ii->is_MergeMem()) {
-            MergeMemNode* n = ii->as_MergeMem();
-            for (MergeMemStream mms(result, n); mms.next_non_empty2(); ) {
-              // If we have not seen this slice yet, make a phi for it.
-              bool made_new_phi = false;
-              if (mms.is_empty()) {
-                Node* new_phi = new_base->slice_memory(mms.adr_type(phase->C));
-                made_new_phi = true;
-                if (igvn) {
-                  igvn->register_new_node_with_optimizer(new_phi);
-                  hook->add_req(new_phi);
-                }
-                mms.set_memory(new_phi);
-              }
-              Node* phi = mms.memory();
-              assert(made_new_phi || phi->in(i) == n, "replace the i-th merge by a slice");
-              phi->set_req(i, mms.memory2());
-            }
-          }
-        }
-        // Distribute all self-loops.
-        { // (Extra braces to hide mms.)
-          for (MergeMemStream mms(result); mms.next_non_empty(); ) {
-            Node* phi = mms.memory();
-            for (uint i = 1; i < req(); ++i) {
-              if (phi->in(i) == this)  phi->set_req(i, phi);
-            }
-          }
-        }
-        // now transform the new nodes, and return the mergemem
-        for (MergeMemStream mms(result); mms.next_non_empty(); ) {
-          Node* phi = mms.memory();
-          mms.set_memory(phase->transform(phi));
-        }
-        hook->destruct(igvn);
-        // Replace self with the result.
-        return result;
-      }
-    }
-    //
-    // Other optimizations on the memory chain
-    //
-    const TypePtr* at = adr_type();
-    for( uint i=1; i<req(); ++i ) {// For all paths in
-      Node *ii = in(i);
-      Node *new_in = MemNode::optimize_memory_chain(ii, at, NULL, phase);
-      if (ii != new_in ) {
-        set_req(i, new_in);
+        set_req_X(i, better_mem, igvn);
+        igvn->_worklist.push(merge_mem);
+        igvn->_worklist.push(better_mem);
         progress = this;
       }
     }
@@ -2492,6 +2452,50 @@ Node* PhiNode::merge_through_phi(Node* root_phi, PhaseIterGVN* igvn) {
   Node* new_vbox_phi = clone_through_phi(root_phi, btype, VectorBoxNode::Box,   igvn);
   Node* new_vect_phi = clone_through_phi(root_phi, vtype, VectorBoxNode::Value, igvn);
   return new VectorBoxNode(igvn->C, new_vbox_phi, new_vect_phi, btype, vtype);
+}
+
+PhiNode *PhiNode::find_simillar_by_adr_type(const TypePtr *adr_type, int max_deep) {
+  if (max_deep == 0) {
+    return NULL;
+  }
+
+  // This method finds nodes which can be a replacement for this Phi node instead of splitting
+  // In order to find replacment this method has checks of simillar graphs which could
+  // be created after splitting and after few optimizatons
+
+  if (req() >= 2) {
+    Node* def = in(MemNode::Control);
+    if (def && def->outcnt() >= 2) {
+      // assert(def->is_Region(), "should be a region");
+      for (DUIterator_Fast dmax, i = def->fast_outs(dmax); i < dmax; i++) {
+        Node* use = def->fast_out(i);
+        if (use != this &&
+            use->Opcode() == Op_Phi &&
+            use->as_Phi()->adr_type() == adr_type &&
+            use->req() == req()) {
+          uint j;
+          for (j = 0; j < use->req(); j++) {
+            Node *ii = in(j);
+          
+            if (use->in(j) != ii) {
+              if (ii->is_Phi() && ii->adr_type() == TypePtr::BOTTOM) {
+                Node *better_phi = ii->as_Phi()->find_simillar_by_adr_type(adr_type, max_deep - 1);
+                if (better_phi != use->in(j)) { // The candidate use has been replaced by corresponding phi
+                  break;
+                }
+              } else {
+                break;
+              }
+            }
+          }
+          if (j == use->req()) {
+            return use->as_Phi();
+          }
+        }
+      }
+    }
+  }
+  return NULL;
 }
 
 bool PhiNode::is_data_loop(RegionNode* r, Node* uin, const PhaseGVN* phase) {

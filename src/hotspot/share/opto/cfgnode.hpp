@@ -146,6 +146,10 @@ class PhiNode : public TypeNode {
   static Node* clone_through_phi(Node* root_phi, const Type* t, uint c, PhaseIterGVN* igvn);
   static Node* merge_through_phi(Node* root_phi, PhaseIterGVN* igvn);
 
+  // Used to control how many times node has been split - last sort of prevention of infinite loops
+  // (Even it sounds scary there's a lot of places where such loops can occur and there's no universal way
+  // to prevent it)
+  int split_count;
 public:
   // Node layout (parallels RegionNode):
   enum { Region,                // Control input is the Phi's region.
@@ -162,7 +166,8 @@ public:
       _inst_mem_id(imid),
       _inst_id(iid),
       _inst_index(iidx),
-      _inst_offset(ioffs)
+      _inst_offset(ioffs),
+      split_count(0)
   {
     init_class_id(Class_Phi);
     init_req(0, r);
@@ -174,6 +179,7 @@ public:
   static PhiNode* make( Node* r, Node* x, const Type *t, const TypePtr* at = NULL );
   // create a new phi with narrowed memory type
   PhiNode* slice_memory(const TypePtr* adr_type) const;
+  PhiNode* split_out_address_type(const TypePtr* addr_t, PhaseIterGVN *igvn);
   PhiNode* split_out_instance(const TypePtr* at, PhaseIterGVN *igvn) const;
   // like make(r, x), but does not initialize the in edges to x
   static PhiNode* make_blank( Node* r, Node* x );
@@ -223,6 +229,10 @@ public:
   virtual Node *Ideal(PhaseGVN *phase, bool can_reshape);
   virtual const RegMask &out_RegMask() const;
   virtual const RegMask &in_RegMask(uint) const;
+
+  PhiNode *find_simillar_by_adr_type(const TypePtr* adr_type, int max_deep = 2);
+
+  static bool stable_phi(PhiNode* phi, PhaseGVN *phase);
 #ifndef PRODUCT
   virtual void related(GrowableArray<Node*> *in_rel, GrowableArray<Node*> *out_rel, bool compact) const;
   virtual void dump_spec(outputStream *st) const;

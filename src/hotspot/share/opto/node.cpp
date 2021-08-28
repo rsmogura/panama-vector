@@ -2386,7 +2386,6 @@ Node* Node::find_similar(int opc) {
   return NULL;
 }
 
-
 //--------------------------unique_ctrl_out------------------------------
 // Return the unique control out if only one. Null if none or more than one.
 Node* Node::unique_ctrl_out() const {
