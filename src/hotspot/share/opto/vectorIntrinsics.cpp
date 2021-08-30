@@ -1023,6 +1023,7 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
       val = gvn().transform(new VectorReinterpretNode(val, val->bottom_type()->is_vect(), to_vect_type));
     }
 
+    // TODO Better cast base to BOT, instead of addr to BOT?
     Node* mem_in = is_mixed_access ? reset_memory() : memory(addr);
     Node* vstore = gvn().transform(StoreVectorNode::make(0, control(),
       mem_in,
@@ -1058,10 +1059,23 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
           is_mixed_access ? gvn().transform(new CheckCastPPNode(control(), addr, TypePtr::BOTTOM)) : addr,
           is_mixed_access ? TypePtr::BOTTOM : addr_type,
           num_elem, elem_bt));
-        // if (is_mixed_access) {
-        //    set_all_memory(reset_memory());
-        // }
+        if (is_mixed_access) {
+          set_all_memory(reset_memory());
+          Node *dummy_addr = basic_plus_adr(base, offset);
+          const TypePtr *dummy_ptr = gvn().type(dummy_addr)->is_ptr();
+          assert(dummy_ptr->isa_aryptr(), "Expected array for vectors, maybe other day with...");
+          assert(addr_type == TypeRawPtr::BOTTOM, "Second address should be raw");
+          Node *dummy_store_heap = gvn().transform(new DummyStoreVNode(control(), memory(dummy_ptr), 
+            dummy_addr,
+            dummy_ptr, vload, MemNode::unordered, vload->ideal_reg()));
+          set_memory(dummy_store_heap, dummy_ptr);  
+          Node *dummy_store_raw = gvn().transform(new DummyStoreVNode(control(), memory(addr_type), 
+            gvn().transform(new CastPPNode(addr, addr_type)),
+            addr_type, vload, MemNode::unordered, vload->ideal_reg()));
+          set_memory(dummy_store_raw, addr_type);
+        }
       }
+
     }
     Node* box = box_vector(vload, vbox_type, elem_bt, num_elem);
     set_result(box);

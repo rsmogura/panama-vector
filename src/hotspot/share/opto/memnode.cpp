@@ -389,7 +389,7 @@ Node *MemNode::Ideal_common(PhaseGVN *phase, bool can_reshape) {
   if (mem->is_MergeMem()) {
     MergeMemNode* mmem = mem->as_MergeMem();
     const TypePtr *tp = t_adr->is_ptr();
-    if (tp != TypePtr::BOTTOM) {
+    if (tp != TypePtr::BOTTOM && adr_type() != TypePtr::BOTTOM) { // TODO Find while checkcast pp get eliminated and converted to byte[]
       mem = step_through_mergemem(phase, mmem, tp, adr_type(), tty);
     }
   }
@@ -2913,6 +2913,14 @@ MemBarNode* StoreNode::trailing_membar() const {
   return NULL;
 }
 
+Node* DummyStoreNode::Identity(PhaseGVN* phase) {
+  // Really we don't want to optimize it as it sometimes put order on memory
+  return this;
+}
+Node* DummyStoreNode::Ideal(PhaseGVN *phase, bool can_reshape) {
+  // Really we don't want to optimize it as it sometimes put order on memory
+  return NULL;
+}
 
 //=============================================================================
 //------------------------------Ideal------------------------------------------
