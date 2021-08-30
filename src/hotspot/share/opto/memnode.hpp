@@ -643,6 +643,31 @@ public:
   MemBarNode* trailing_membar() const;
 };
 
+class DummyStoreNode : public StoreNode {
+private:
+  const uint _reg;
+public:
+  DummyStoreNode(Node *c, Node *mem, Node *adr, const TypePtr* at, Node *val, MemOrd mo, uint reg) :
+    StoreNode(c, mem, adr, at, val, mo), _reg(reg)  {
+
+  }
+  virtual int Opcode() const;
+  virtual Node* Identity(PhaseGVN* phase);
+  virtual Node *Ideal(PhaseGVN *phase, bool can_reshape);
+  virtual BasicType memory_type() const { return T_VOID; } //TODO Or maybe VOID?
+
+  virtual uint ideal_reg() const  { return 0; }
+};
+
+class DummyStoreVNode : public DummyStoreNode {
+public:
+  DummyStoreVNode(Node *c, Node *mem, Node *adr, const TypePtr* at, Node *val, MemOrd mo, uint reg) :
+    DummyStoreNode(c, mem, adr, at, val, mo, reg) {
+
+  }
+  virtual int Opcode() const;
+};
+
 //------------------------------StoreBNode-------------------------------------
 // Store byte to memory
 class StoreBNode : public StoreNode {
