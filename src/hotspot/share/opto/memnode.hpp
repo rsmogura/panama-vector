@@ -643,6 +643,13 @@ public:
   MemBarNode* trailing_membar() const;
 };
 
+/**
+ * Dummy store, simulating store, but no-op. Used to add "some" ordering to memory.
+ * Number of optimizations tunred off.
+ * 
+ * When adding a new node:
+ * - prevent folding in StoreNode::Ideal (extend this with fast class query if required)
+ */
 class DummyStoreNode : public StoreNode {
 private:
   const uint _reg;

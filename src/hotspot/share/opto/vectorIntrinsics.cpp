@@ -1023,11 +1023,15 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
       val = gvn().transform(new VectorReinterpretNode(val, val->bottom_type()->is_vect(), to_vect_type));
     }
 
-    // TODO Better cast base to BOT, instead of addr to BOT?
+   // Cast nodes are 'insecure' - TypePtr::BOTTOM can be folded to more concrete type nearby, which later can change a type of
+   // StoreVector, LoadVector or DummyStore, and such changed node will see through mem bars (instead of whole mem). Thus CastPP
+   // is with UnconditionalDependency which prevents folding (dominators)
+   // TODO Tune loops unrolling - in mixed mode one load is transformed to 2x DummyStores, plus few check casts / addresses - this makes
+   //      loops heavier when calculating unrolls (IdealLoopTree::policy_unroll)
     Node* mem_in = is_mixed_access ? reset_memory() : memory(addr);
     Node* vstore = gvn().transform(StoreVectorNode::make(0, control(),
       mem_in,
-      is_mixed_access ? gvn().transform(new CheckCastPPNode(control(), addr, TypePtr::BOTTOM)) : addr,
+      is_mixed_access ? gvn().transform(new CheckCastPPNode(control(), addr, TypePtr::BOTTOM, ConstraintCastNode::UnconditionalDependency)) : addr,
       is_mixed_access ? TypePtr::BOTTOM : addr_type,
       val, store_num_elem));
     if (is_mixed_access) {
@@ -1056,7 +1060,7 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
       } else {
         vload = gvn().transform(LoadVectorNode::make(0, control(),
           is_mixed_access ? merged_memory() : memory(addr),
-          is_mixed_access ? gvn().transform(new CheckCastPPNode(control(), addr, TypePtr::BOTTOM)) : addr,
+          is_mixed_access ? gvn().transform(new CheckCastPPNode(control(), addr, TypePtr::BOTTOM, ConstraintCastNode::UnconditionalDependency)) : addr,
           is_mixed_access ? TypePtr::BOTTOM : addr_type,
           num_elem, elem_bt));
         if (is_mixed_access) {
@@ -1065,12 +1069,13 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
           const TypePtr *dummy_ptr = gvn().type(dummy_addr)->is_ptr();
           assert(dummy_ptr->isa_aryptr(), "Expected array for vectors, maybe other day with...");
           assert(addr_type == TypeRawPtr::BOTTOM, "Second address should be raw");
+
           Node *dummy_store_heap = gvn().transform(new DummyStoreVNode(control(), memory(dummy_ptr), 
-            dummy_addr,
+            gvn().transform(new CheckCastPPNode(control(), addr, dummy_ptr, ConstraintCastNode::UnconditionalDependency)), // TODO Not needed (dummy_addr is dummy_ptr)
             dummy_ptr, vload, MemNode::unordered, vload->ideal_reg()));
           set_memory(dummy_store_heap, dummy_ptr);  
           Node *dummy_store_raw = gvn().transform(new DummyStoreVNode(control(), memory(addr_type), 
-            gvn().transform(new CastPPNode(addr, addr_type)),
+            gvn().transform(new CheckCastPPNode(control(), addr, addr_type, ConstraintCastNode::UnconditionalDependency)), // TODO Not needed (addr_type is raw)
             addr_type, vload, MemNode::unordered, vload->ideal_reg()));
           set_memory(dummy_store_raw, addr_type);
         }
