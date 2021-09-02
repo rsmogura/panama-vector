@@ -488,6 +488,11 @@ void IdealGraphPrinter::visit_node(Node *n, bool edges, VectorSet* temp_set) {
     assert(s2.size() < sizeof(buffer), "size in range");
     print_prop("dump_spec", buffer);
 
+    if (node->multi_adr_type()) {
+      s2.reset();
+      node->multi_adr_type()->dump_on(&s2);
+      print_prop("multi_addr", buffer);
+    }
     if (node->is_block_proj()) {
       print_prop("is_block_proj", "true");
     }

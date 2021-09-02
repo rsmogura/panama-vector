@@ -301,6 +301,8 @@ static void init_node_notes(Compile* C, int idx, Node_Notes* nn) {
 
 // Shared initialization code.
 inline int Node::Init(int req) {
+  _multi_adr_type = NULL;
+
   Compile* C = Compile::current();
   int idx = C->next_unique();
   NOT_PRODUCT(_igv_idx = C->next_igv_idx());

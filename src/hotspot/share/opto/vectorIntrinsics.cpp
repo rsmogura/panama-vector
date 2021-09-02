@@ -1041,6 +1041,14 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
       const TypePtr *dummy_ptr = gvn().type(dummy_addr)->is_ptr();
       assert(dummy_ptr->isa_aryptr(), "Expected array for vectors, maybe other day with...");
       assert(addr_type == TypeRawPtr::BOTTOM, "Second address should be raw");
+
+      const TypePtr *dummy_type = gvn().type(dummy_addr)->is_ptr();
+      auto fields = TypeTuple::fields(2); // TODO Not most memory effective way
+      fields[0] = dummy_type;
+      fields[1] = addr_type;
+
+      vstore->_multi_adr_type = TypeTuple::make(2, fields);
+
       set_memory(vstore, dummy_ptr); // Raw address will be updated in later
     }
     set_memory(vstore, addr_type);
@@ -1058,26 +1066,22 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
         vload = gvn().transform(LoadVectorNode::make(0, control(), memory(addr), addr, addr_type, num_elem, T_BOOLEAN));
         vload = gvn().transform(new VectorLoadMaskNode(vload, TypeVect::makemask(elem_bt, num_elem)));
       } else {
+        //Node *mem = is_mixed_access ? reset_memory() : memory(addr);
+        // Harden memory merge go through
+        Node *mem = is_mixed_access ? merged_memory() : memory(addr);
         vload = gvn().transform(LoadVectorNode::make(0, control(),
-          is_mixed_access ? merged_memory() : memory(addr),
-          is_mixed_access ? gvn().transform(new CheckCastPPNode(control(), addr, TypePtr::BOTTOM, ConstraintCastNode::UnconditionalDependency)) : addr,
+          mem,
+          is_mixed_access ? gvn().transform(new CastPPNode(addr, TypePtr::BOTTOM, ConstraintCastNode::UnconditionalDependency)) : addr,
           is_mixed_access ? TypePtr::BOTTOM : addr_type,
           num_elem, elem_bt));
         if (is_mixed_access) {
-          set_all_memory(reset_memory());
           Node *dummy_addr = basic_plus_adr(base, offset);
-          const TypePtr *dummy_ptr = gvn().type(dummy_addr)->is_ptr();
-          assert(dummy_ptr->isa_aryptr(), "Expected array for vectors, maybe other day with...");
-          assert(addr_type == TypeRawPtr::BOTTOM, "Second address should be raw");
-
-          Node *dummy_store_heap = gvn().transform(new DummyStoreVNode(control(), memory(dummy_ptr), 
-            gvn().transform(new CheckCastPPNode(control(), addr, dummy_ptr, ConstraintCastNode::UnconditionalDependency)), // TODO Not needed (dummy_addr is dummy_ptr)
-            dummy_ptr, vload, MemNode::unordered, vload->ideal_reg()));
-          set_memory(dummy_store_heap, dummy_ptr);  
-          Node *dummy_store_raw = gvn().transform(new DummyStoreVNode(control(), memory(addr_type), 
-            gvn().transform(new CheckCastPPNode(control(), addr, addr_type, ConstraintCastNode::UnconditionalDependency)), // TODO Not needed (addr_type is raw)
-            addr_type, vload, MemNode::unordered, vload->ideal_reg()));
-          set_memory(dummy_store_raw, addr_type);
+          const TypePtr *dummy_type = gvn().type(dummy_addr)->is_ptr();
+          auto fields = TypeTuple::fields(2); // TODO Not most memory effective way
+          fields[0] = dummy_type;
+          fields[1] = addr_type;
+          vload->_multi_adr_type = TypeTuple::make(2, fields);
+          // set_all_memory(mem); // Harden memory tests
         }
       }
 

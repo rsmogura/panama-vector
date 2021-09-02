@@ -1537,6 +1537,7 @@ void ArchDesc::defineExpand(FILE *fp, InstructForm *node) {
       if (node->captures_bottom_type(_globalNames) &&
           new_inst->captures_bottom_type(_globalNames)) {
         fprintf(fp, "  ((MachTypeNode*)n%d)->_bottom_type = bottom_type();\n", cnt);
+        fprintf(fp, "  ((MachTypeNode*)n%d)->_multi_adr_type = multi_adr_type();\n", cnt);
       }
 
       const char *resultOper = new_inst->reduce_result();
@@ -3929,6 +3930,7 @@ void ArchDesc::buildMachNode(FILE *fp_cpp, InstructForm *inst, const char *inden
   if (inst->captures_bottom_type(_globalNames)) {
     if (strncmp("MachCall", inst->mach_base_class(_globalNames), strlen("MachCall"))) {
       fprintf(fp_cpp, "%s node->_bottom_type = _leaf->bottom_type();\n", indent);
+      fprintf(fp_cpp, "%s node->_multi_adr_type = _leaf->multi_adr_type();\n", indent);
     }
   }
   if( inst->is_ideal_if() ) {
@@ -3992,6 +3994,7 @@ bool InstructForm::define_cisc_version(ArchDesc &AD, FILE *fp_cpp) {
     // Fill in the bottom_type where requested
     if ( this->captures_bottom_type(AD.globalNames()) ) {
       fprintf(fp_cpp, "  node->_bottom_type = bottom_type();\n");
+      fprintf(fp_cpp, "  node->_multi_adr_type = multi_adr_type();\n");
     }
 
     uint cur_num_opnds = num_opnds();
@@ -4043,6 +4046,7 @@ bool InstructForm::define_short_branch_methods(ArchDesc &AD, FILE *fp_cpp) {
     // Fill in the bottom_type where requested
     if ( this->captures_bottom_type(AD.globalNames()) ) {
       fprintf(fp_cpp, "  node->_bottom_type = bottom_type();\n");
+      fprintf(fp_cpp, "  node->_multi_adr_type = multi_adr_type();\n");
     }
 
     fprintf(fp_cpp, "\n");

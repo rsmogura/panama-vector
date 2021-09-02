@@ -326,6 +326,11 @@ protected:
   // Therefore, it updates the value of the _idx field. The parse-time _idx is
   // preserved in _parse_idx.
   const node_idx_t _idx;
+
+  // Used for nodes potentially requiring multiple addresses (i. e. loads or stores in mixed mode can virtually require two address type raw / byte[])
+  // Limitted support
+  const TypeTuple* _multi_adr_type;
+
   DEBUG_ONLY(const node_idx_t _parse_idx;)
   // IGV node identifier. Two nodes, possibly in different compilation phases,
   // have the same IGV identifier if (and only if) they are the very same node
@@ -1018,6 +1023,9 @@ public:
   // Returns TypePtr::BOTTOM if the node touches memory "broadly".
   virtual const class TypePtr *adr_type() const { return NULL; }
 
+  const TypeTuple* multi_adr_type() const {
+    return _multi_adr_type;
+  }
   // Return an existing node which computes the same function as this node.
   // The optimistic combined algorithm requires this to return a Node which
   // is a small number of steps away (e.g., one of my inputs).
