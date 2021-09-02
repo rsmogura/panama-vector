@@ -1024,10 +1024,8 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
     }
 
    // Cast nodes are 'insecure' - TypePtr::BOTTOM can be folded to more concrete type nearby, which later can change a type of
-   // StoreVector, LoadVector or DummyStore, and such changed node will see through mem bars (instead of whole mem). Thus CastPP
+   // StoreVector, LoadVector, and such changed node will see through mem bars (instead of whole mem). Thus CastPP
    // is with UnconditionalDependency which prevents folding (dominators)
-   // TODO Tune loops unrolling - in mixed mode one load is transformed to 2x DummyStores, plus few check casts / addresses - this makes
-   //      loops heavier when calculating unrolls (IdealLoopTree::policy_unroll)
     Node* mem_in = is_mixed_access ? reset_memory() : memory(addr);
     Node* vstore = gvn().transform(StoreVectorNode::make(0, control(),
       mem_in,

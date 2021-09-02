@@ -189,8 +189,6 @@ void PhaseCFG::implicit_null_check(Block* block, Node *proj, Node *val, int allo
     case Op_StoreP:
     case Op_StoreN:
     case Op_StoreNKlass:
-    case Op_DummyStore:
-    case Op_DummyStoreV:
       was_store = true;         // Memory op is a store op
       // Stores will have their address in slot 2 (memory in slot 1).
       // If the value being nul-checked is in another slot, it means we
@@ -698,7 +696,6 @@ void PhaseCFG::adjust_register_pressure(Node* n, Block* block, intptr_t* recalc_
         case Op_StoreC:
         case Op_StoreCM:
         case Op_StoreD:
-        case Op_DummyStore:
         case Op_StoreF:
         case Op_StoreI:
         case Op_StoreL:

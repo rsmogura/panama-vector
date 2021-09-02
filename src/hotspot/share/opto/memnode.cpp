@@ -2668,7 +2668,7 @@ Node *StoreNode::Ideal(PhaseGVN *phase, bool can_reshape) {
     // require exactly ONE user until such time as we clone 'mem' for
     // each of 'mem's uses (thus making the exactly-1-user-rule hold
     // true).
-    while (st->is_Store() && st->outcnt() == 1 && st->Opcode() != Op_StoreCM && st->Opcode() != Op_DummyStoreV) {
+    while (st->is_Store() && st->outcnt() == 1 && st->Opcode() != Op_StoreCM) {
       // Looking at a dead closed cycle of memory?
       assert(st != st->in(MemNode::Memory), "dead loop in StoreNode::Ideal");
       assert(Opcode() == st->Opcode() ||
@@ -2910,15 +2910,6 @@ MemBarNode* StoreNode::trailing_membar() const {
     }
     return trailing_mb;
   }
-  return NULL;
-}
-
-Node* DummyStoreNode::Identity(PhaseGVN* phase) {
-  // Really we don't want to optimize it as it sometimes put order on memory
-  return this;
-}
-Node* DummyStoreNode::Ideal(PhaseGVN *phase, bool can_reshape) {
-  // Really we don't want to optimize it as it sometimes put order on memory
   return NULL;
 }
 

@@ -3779,14 +3779,6 @@ instruct storeV(memory mem, vec src) %{
   ins_pipe( pipe_slow );
 %}
 
-// Dummy store for vectors
-instruct dummyStoreV(memory mem, vec src) %{
-  match(Set mem (DummyStoreV mem src));
-  ins_cost(1);
-  format %{ "# dummyStoreV $mem" %}
-  ins_encode(/* empty encoding */);
-  ins_pipe(empty);
-%}
 // ---------------------------------------- Gather ------------------------------------
 
 // Gather INT, LONG, FLOAT, DOUBLE
