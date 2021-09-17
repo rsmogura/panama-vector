@@ -1040,10 +1040,10 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
       assert(dummy_ptr->isa_aryptr(), "Expected array for vectors, maybe other day with...");
       assert(addr_type == TypeRawPtr::BOTTOM, "Second address should be raw");
 
-      const TypePtr *dummy_type = gvn().type(dummy_addr)->is_ptr();
-      auto fields = TypeTuple::fields(2); // TODO Not most memory effective way
-      fields[0] = dummy_type;
-      fields[1] = addr_type;
+      // const TypePtr *dummy_type = gvn().type(dummy_addr)->is_ptr();
+      // auto fields = TypeTuple::fields(2); // TODO Not most memory effective way
+      // fields[0] = dummy_type;
+      // fields[1] = addr_type;
 
       // vstore->_multi_adr_type = TypeTuple::make(2, fields);
 
@@ -1072,15 +1072,15 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
           is_mixed_access ? gvn().transform(CastPPNode::make_cast(Op_CheckCastPP, control(), addr, TypePtr::BOTTOM, ConstraintCastNode::UnconditionalDependency, ConstraintCastNode::ForcedCast)) : addr,
           is_mixed_access ? TypePtr::BOTTOM : addr_type,
           num_elem, elem_bt));
-        if (is_mixed_access) {
-          Node *dummy_addr = basic_plus_adr(base, offset);
-          const TypePtr *dummy_type = gvn().type(dummy_addr)->is_ptr();
-          auto fields = TypeTuple::fields(2); // TODO Not most memory effective way
-          fields[0] = dummy_type;
-          fields[1] = addr_type;
-          // vload->_multi_adr_type = TypeTuple::make(2, fields);
-          // set_all_memory(mem); // Harden memory tests
-        }
+        // if (is_mixed_access) {
+        //   Node *dummy_addr = basic_plus_adr(base, offset);
+        //   const TypePtr *dummy_type = gvn().type(dummy_addr)->is_ptr();
+        //   auto fields = TypeTuple::fields(2); // TODO Not most memory effective way
+        //   fields[0] = dummy_type;
+        //   fields[1] = addr_type;
+        //   // vload->_multi_adr_type = TypeTuple::make(2, fields);
+        //   // set_all_memory(mem); // Harden memory tests
+        // }
       }
 
     }
