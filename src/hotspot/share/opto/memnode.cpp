@@ -35,6 +35,7 @@
 #include "opto/arraycopynode.hpp"
 #include "opto/cfgnode.hpp"
 #include "opto/regalloc.hpp"
+#include "opto/castnode.hpp"
 #include "opto/compile.hpp"
 #include "opto/connode.hpp"
 #include "opto/convertnode.hpp"
@@ -878,6 +879,37 @@ Node *LoadNode::make(PhaseGVN& gvn, Node *ctl, Node *mem, Node *adr, const TypeP
           // oop will be recorded in oop map if load crosses safepoint
           rt->isa_oopptr() || is_immutable_value(adr),
           "raw memory operations should have control edge");
+  const TypeTuple* multi_adr_type = NULL;
+  if (StressMultiMemLoadStore && adr_type && !adr_type->is_known_instance() && adr_type->base() != Type::AnyPtr &&
+      (bt == T_BOOLEAN || bt == T_BYTE || bt == T_INT || bt == T_CHAR || bt == T_SHORT
+       || bt == T_LONG || bt == T_FLOAT || bt == T_DOUBLE)) {
+    intptr_t offset;
+    Node *base = AddPNode::Ideal_base_and_offset(adr, &gvn, offset);
+    if (base != NULL) {
+      auto fields = TypeTuple::fields(1);
+      fields[0] = adr_type;
+      multi_adr_type = TypeTuple::make(1, fields);
+
+      adr_type = TypePtr::BOTTOM;
+      auto new_base = gvn.transform(ConstraintCastNode::make_cast(Op_CastPP, ctl, base, adr_type, ConstraintCastNode::UnconditionalDependency));
+      adr = adr->clone();
+      // if (adr->in(AddPNode::Base) == base) {
+      //   adr->set_req_X(AddPNode::Base, new_base, &gvn);
+      // }
+      if (adr->in(AddPNode::Address) == base) {
+        adr->set_req_X(AddPNode::Address, new_base, &gvn);
+      }
+      adr = gvn.transform(adr);
+    } else {
+      multi_adr_type = NULL; // Reset so will not be mult_mem
+    }
+    // auto fields = TypeTuple::fields(1);
+    // fields[0] = adr_type;
+    // multi_adr_type = TypeTuple::make(1, fields);
+
+    // adr_type = TypePtr::BOTTOM;
+    // adr = gvn.transform(ConstraintCastNode::make_cast(Op_CastPP, ctl, adr, adr_type, ConstraintCastNode::UnconditionalDependency));
+  }
   LoadNode* load = NULL;
   switch (bt) {
   case T_BOOLEAN: load = new LoadUBNode(ctl, mem, adr, adr_type, rt->is_int(),  mo, control_dependency); break;
@@ -918,6 +950,15 @@ Node *LoadNode::make(PhaseGVN& gvn, Node *ctl, Node *mem, Node *adr, const TypeP
   if (load->Opcode() == Op_LoadN) {
     Node* ld = gvn.transform(load);
     return new DecodeNNode(ld, ld->bottom_type()->make_ptr());
+  }
+
+  if (multi_adr_type) {
+    load->_multi_adr_type = multi_adr_type;
+      if (C->method() && C->method()->holder() && C->method()->holder()->name() && C->method()->name()) {
+        tty->print("🔁 Multi memory node: ");
+        tty->print("%s::%s\n", C->method()->holder()->name()->as_utf8(), C->method()->name()->as_utf8());
+        load->dump();
+      }
   }
 
   return load;
@@ -2587,6 +2628,30 @@ StoreNode* StoreNode::make(PhaseGVN& gvn, Node* ctl, Node* mem, Node* adr, const
   assert(C->get_alias_index(adr_type) != Compile::AliasIdxRaw ||
          ctl != NULL, "raw memory operations should have control edge");
 
+  const TypeTuple* multi_adr_type = NULL;
+  // if (StressMultiMemLoadStore && adr_type && !adr_type->is_known_instance() && 
+  //     (bt == T_BOOLEAN || bt == T_BYTE || bt == T_INT || bt == T_CHAR || bt == T_SHORT
+  //      || bt == T_LONG || bt == T_FLOAT || bt == T_DOUBLE)) {
+  //   intptr_t offset;
+  //   Node *base = AddPNode::Ideal_base_and_offset(adr, &gvn, offset);
+  //   if (base != NULL) {
+  //     auto fields = TypeTuple::fields(1);
+  //     fields[0] = adr_type;
+  //     multi_adr_type = TypeTuple::make(1, fields);
+
+  //     adr_type = TypePtr::BOTTOM;
+  //     auto new_base = gvn.transform(ConstraintCastNode::make_cast(Op_CastPP, ctl, base, adr_type, ConstraintCastNode::UnconditionalDependency));
+  //     adr = adr->clone();
+  //     if (adr->in(AddPNode::Base) == base) {
+  //       adr->set_req_X(AddPNode::Base, new_base, &gvn);
+  //     }
+  //     if (adr->in(AddPNode::Address) == base) {
+  //       adr->set_req_X(AddPNode::Address, new_base, &gvn);
+  //     }
+  //     adr = gvn.transform(adr);
+  //   }
+  // }
+
   switch (bt) {
   case T_BOOLEAN: val = gvn.transform(new AndINode(val, gvn.intcon(0x1))); // Fall through to T_BYTE case
   case T_BYTE:    return new StoreBNode(ctl, mem, adr, adr_type, val, mo);
@@ -2668,7 +2733,7 @@ Node *StoreNode::Ideal(PhaseGVN *phase, bool can_reshape) {
     // require exactly ONE user until such time as we clone 'mem' for
     // each of 'mem's uses (thus making the exactly-1-user-rule hold
     // true).
-    while (st->is_Store() && st->outcnt() == 1 && st->Opcode() != Op_StoreCM) {
+    while (st->is_Store() && st->outcnt() == 1 && st->Opcode() != Op_StoreCM && adr_type() != TypePtr::BOTTOM) {
       // Looking at a dead closed cycle of memory?
       assert(st != st->in(MemNode::Memory), "dead loop in StoreNode::Ideal");
       assert(Opcode() == st->Opcode() ||

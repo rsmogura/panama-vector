@@ -49,6 +49,10 @@ Node* ConstraintCastNode::Identity(PhaseGVN* phase) {
 // Take 'join' of input and cast-up type
 const Type* ConstraintCastNode::Value(PhaseGVN* phase) const {
   if (in(0) && phase->type(in(0)) == Type::TOP) return Type::TOP;
+  
+  if (_castType == ForcedCast)
+    return this->_type;
+  
   const Type* ft = phase->type(in(1))->filter_speculative(_type);
 
 #ifdef ASSERT
@@ -89,7 +93,7 @@ uint ConstraintCastNode::size_of() const {
   return sizeof(*this);
 }
 
-Node* ConstraintCastNode::make_cast(int opcode, Node* c, Node *n, const Type *t, DependencyType dependency) {
+Node* ConstraintCastNode::make_cast(int opcode, Node* c, Node *n, const Type *t, DependencyType dependency, CastType castType) {
   switch(opcode) {
   case Op_CastII: {
     Node* cast = new CastIINode(n, t, dependency);
@@ -102,7 +106,7 @@ Node* ConstraintCastNode::make_cast(int opcode, Node* c, Node *n, const Type *t,
     return cast;
   }
   case Op_CastPP: {
-    Node* cast = new CastPPNode(n, t, dependency);
+    Node* cast = new CastPPNode(n, t, dependency, castType);
     cast->set_req(0, c);
     return cast;
   }
@@ -121,7 +125,7 @@ Node* ConstraintCastNode::make_cast(int opcode, Node* c, Node *n, const Type *t,
     cast->set_req(0, c);
     return cast;
   }
-  case Op_CheckCastPP: return new CheckCastPPNode(c, n, t, dependency);
+  case Op_CheckCastPP: return new CheckCastPPNode(c, n, t, dependency, castType);
   default:
     fatal("Bad opcode %d", opcode);
   }
@@ -188,6 +192,9 @@ void ConstraintCastNode::dump_spec(outputStream *st) const {
   TypeNode::dump_spec(st);
   if (_dependency != RegularDependency) {
     st->print(" %s dependency", _dependency == StrongDependency ? "strong" : "unconditional");
+  }
+  if (_castType == ForcedCast) {
+    st->print(" forced cast");
   }
 }
 #endif
@@ -400,6 +407,9 @@ Node* CheckCastPPNode::Identity(PhaseGVN* phase) {
 // Take 'join' of input and cast-up type, unless working with an Interface
 const Type* CheckCastPPNode::Value(PhaseGVN* phase) const {
   if( in(0) && phase->type(in(0)) == Type::TOP ) return Type::TOP;
+  
+  if (_castType == ForcedCast)
+    return this->_type;
 
   const Type *inn = phase->type(in(1));
   if( inn == Type::TOP ) return Type::TOP;  // No information yet
