@@ -57,7 +57,7 @@
  *
 */
 
-const int max_scale_for_prediction = 1 << 16;
+const int max_scale_for_prediction = 1 << 24;
 
 //-------------------------------register_control-------------------------
 void PhaseIdealLoop::register_control(Node* n, IdealLoopTree *loop, Node* pred, bool update_body) {
@@ -625,7 +625,7 @@ class Invariance : public StackObj {
 // Returns true if the predicate of iff is in "scale*iv + offset u< load_range(ptr)" format
 // Note: this function is particularly designed for loop predication. We require load_range
 //       and offset to be loop invariant computed on the fly by "invar"
-bool IdealLoopTree::is_range_check_if(IfNode *iff, PhaseIdealLoop *phase, Invariance& invar, bool& is_long_rce) const {
+bool IdealLoopTree::is_range_check_if(IfNode *iff, PhaseIdealLoop *phase, Invariance& invar, CountedLoopNode* cl, bool& is_long_rce) const {
   if (!is_loop_exit(iff)) {
     return false;
   }
@@ -669,9 +669,11 @@ bool IdealLoopTree::is_range_check_if(IfNode *iff, PhaseIdealLoop *phase, Invari
   if (!phase->is_scaled_iv_plus_offset(cmp->in(1), iv, &scale, &offset, 0, is_long_rce)) { // Important to search mode only for long RCE 
     return false;
   }
-  if (is_long_rce && (ABS(scale) > max_scale_for_prediction)) {
-    // Ensure scale is small enaugh to not perform overflow in rc_predicate (there's assert)
-    return false;
+  if (is_long_rce) {
+    Node* rng = cmp->in(2);
+    if (!is_valid_for_long_rce(cl, scale, rng)) {
+      return false;
+    }
   }
   if (offset && !invar.is_invariant(offset)) { // offset must be invariant
     return false;
@@ -679,7 +681,19 @@ bool IdealLoopTree::is_range_check_if(IfNode *iff, PhaseIdealLoop *phase, Invari
   return true;
 }
 
-bool IdealLoopTree::is_valid_for_long_rce(const CountedLoopNode* cl) const {
+bool IdealLoopTree::is_valid_for_long_rce(const CountedLoopNode* cl, jint scale, Node *range) const {
+  // Ensure scale is small enaugh to not perform overflow in rc_predicate (there's assert)
+  if ((scale <= -max_scale_for_prediction) || (scale >= max_scale_for_prediction)) {
+    return false;
+  }
+
+  // Strongly depends if range is positive, this should be computed during loop unswitching (this is risky check)
+  auto bt = range->bottom_type();
+  assert(!bt->isa_long() || bt->is_long()->_lo >= 0, "Something inefficient?");
+  if (!bt->isa_long() || bt->is_long()->_lo < 0) {
+    return false;
+  }
+
   return
     cl->init_trip()->bottom_type()->isa_int() &&
     cl->stride()->bottom_type()->isa_int() &&
@@ -704,10 +718,10 @@ bool IdealLoopTree::is_valid_for_long_rce(const CountedLoopNode* cl) const {
 BoolNode* PhaseIdealLoop::rc_predicate(IdealLoopTree *loop, Node* ctrl,
                                        int scale, Node* offset,
                                        Node* init, Node* limit, jint stride,
-                                       Node* range, bool upper, bool &overflow, bool long_rce_mode) {                                       
+                                       Node* range, bool upper, bool &overflow, enum rc_predicate_mode_type rc_predicate_mode) {                                       
   jlong con_limit  = (limit != NULL && limit->is_Con())  ? limit->get_int_or_long()  : 0;
   jlong con_init   = init->is_Con()   ? init->get_int_or_long()   : 0;
-  jlong con_offset = offset->is_Con() ? (long_rce_mode ? offset->get_int_or_long() : offset->get_int()) : 0;
+  jlong con_offset = offset->is_Con() ? ((rc_predicate_mode == rc_predicate_long_low_up_rc_t) ? offset->get_int_or_long() : offset->get_int()) : 0;
 
   stringStream* predString = NULL;
   if (TraceLoopPredicate) {
@@ -718,6 +732,35 @@ BoolNode* PhaseIdealLoop::rc_predicate(IdealLoopTree *loop, Node* ctrl,
   overflow = false;
   Node* max_idx_expr = NULL;
   BoolNode* overflow_checks = NULL; // Ensure test is not overflow
+
+
+  // Note for long RCE
+  // ijewasrythygvgvgewaefbjrwazx
+  // (1) If the mode is rc_predicate_long_low_up_rc_t, we assume:
+  //  - caller will insert lower & upper rc_predicates
+  //  - checks are for range check implemented with CmpUL, so we check if 0 <= (i*scale + offset) < range
+  //  - i can be in range min_jint, max_jint (i.e. for (int i=Integer.MIN_VALUE, ...))
+  // Because we put limit on scale max_scale_for_prediction, the ABS(i * scale) will be always smaller than Long.MAX_VALUE
+  // so the "messy" long overflow like we can overflow lower and upper checks so we will meat criteria, and we will read over array will not happen.
+  // In details, suppose loop for (int i=start; i < max; i+=stride) { Objects.checkIndex(i*scale + offset)}
+  // Assume scale > 0, and start, can be Intger.MIN_VALUE, max = Integer.MAX_VALUE (or other values)
+  // Offset is quite large to verflow long
+  // Range can be quite large (i.e. Long.MAX_VALUE)
+  //  Case 1. If lower bound will overflow (through lower bound), the value will be positive long quite close Long.MAX_VALUE (around max_jlong - i * scale)
+  //  (this alone will cause issue, however caller guarantes 2nd range check to be inserted)
+  //  Upper bound:
+  //  a) can overflow, and will be positive long larger than lower_bound -> in this case it means code works on hacky overflow loop
+  //     (i.e. for (int i=-Integer.MIN_VALUE; i <= 0) { Object.checkIndex(i - Long.MAX_VALUE, Long.MAX_VALUE)})
+  //  b) upper bound will not overflow, and here due to limit put on scale, i * scale << Long.MAX_VALUE -> i * scale < 0, and CmpUL will fail againt
+  //     any positive range (unsigned compare)
+  //  Case 2. If lower bound will not overflow:
+  //  a) upper bound will not overflow long, and we perform good CmpUL
+  //  b) upper bound overflow, and simillary upper bound < 0, and CmpUL fails
+  //  Above is valid only for CmpUL range checks where caller guarantes that range is positive!
+  const bool force_overflow = rc_predicate_mode == rc_predicate_long_low_up_rc_t;
+
+  // Ensure check in is_valid_for_long_rce is still valid - may require changes if addint new long RCE modes
+  assert((rc_predicate_mode != rc_predicate_long_low_up_rc_t) || range->bottom_type()->is_long()->_lo >= 0L, "Just ensure we check agains positive ranges");
 
   const TypeInt* idx_type = TypeInt::INT;
   if ((stride > 0) == (scale > 0) == upper) {
@@ -733,18 +776,13 @@ BoolNode* PhaseIdealLoop::rc_predicate(IdealLoopTree *loop, Node* ctrl,
     // Check if (limit - stride) may overflow (only for int stride and int RCE, for long RCE not implemented now, as most cases limit will span all values)
     // TODO Implement overflow checks for RCE
 
-    // Note for long RCE
-    // At this point we know loop is int indexed, and may have long RCE
-    // If the we exepct that substraction can overflow, value will be converted to long
-    // However we know that ijewasrythygvgvgewaefbjrwazx
-    // if this will overflow the final value will be in long range, and long range can't overflow
-    // we take care about long RCE & long overflow later.
-    // When we talk about overflow we not only think for int overflow but as well long overflow (in case of long RCE)
+
     const TypeInt* limit_type = _igvn.type(limit)->isa_int();
     jint limit_lo = limit_type->_lo;
     jint limit_hi = limit_type->_hi;
-    if ((stride > 0 && (java_subtract(limit_lo, stride) < limit_lo)) ||
-        (stride < 0 && (java_subtract(limit_hi, stride) > limit_hi))) {
+    if (!force_overflow &&
+        ((stride > 0 && (java_subtract(limit_lo, stride) < limit_lo)) ||
+        (stride < 0 && (java_subtract(limit_hi, stride) > limit_hi)))) {
       // No overflow possible
       ConINode* con_stride = _igvn.intcon(stride);
       set_ctrl(con_stride, C->root());
@@ -774,7 +812,7 @@ BoolNode* PhaseIdealLoop::rc_predicate(IdealLoopTree *loop, Node* ctrl,
 
   // In case of Long RCE - scale is limitted to 16 bits, so any multiplication will not overflow long
   if (scale != 1) {
-    assert(!long_rce_mode || (ABS(scale) <= max_scale_for_prediction), "Ensure check in is_range_check_if persists");
+    assert(!(rc_predicate_mode == rc_predicate_long_low_up_rc_t) || (ABS(scale) <= max_scale_for_prediction), "Ensure check in is_range_check_if persists");
     ConNode* con_scale = _igvn.intcon(scale);
     set_ctrl(con_scale, C->root());
     if (TraceLoopPredicate) {
@@ -784,7 +822,7 @@ BoolNode* PhaseIdealLoop::rc_predicate(IdealLoopTree *loop, Node* ctrl,
     const TypeInt* scale_type = TypeInt::make(scale);
     MulINode* mul = new MulINode(max_idx_expr, con_scale);
     idx_type = (TypeInt*)mul->mul_ring(idx_type, scale_type);
-    if (overflow || TypeInt::INT->higher_equal(idx_type)) {
+    if (overflow || force_overflow || TypeInt::INT->higher_equal(idx_type)) {
       // May overflow
       mul->destruct(&_igvn);
       if (!overflow) {
@@ -815,104 +853,68 @@ BoolNode* PhaseIdealLoop::rc_predicate(IdealLoopTree *loop, Node* ctrl,
         predString->print("+ offset");
       }
     }
-    // TODO This can be optimized for long RCE, when we now offset is in int range,
-    //       but probably will not be, as it will be composition of outer long phi, so leaving as having low priority
-    if (!long_rce_mode) {
-      // Check if (max_idx_expr + offset) may overflow
-      const TypeInt* offset_type = _igvn.type(offset)->isa_int();
-      jint lo = java_add(idx_type->_lo, offset_type->_lo);
-      jint hi = java_add(idx_type->_hi, offset_type->_hi);
-      if (overflow || (lo > hi) ||
-          ((idx_type->_lo & offset_type->_lo) < 0 && lo >= 0) ||
-          ((~(idx_type->_hi | offset_type->_hi)) < 0 && hi < 0)) {
-        // May overflow
-        if (!overflow) {
-          max_idx_expr = new ConvI2LNode(max_idx_expr);
-          register_new_node(max_idx_expr, ctrl);
+
+    // Check if (max_idx_expr + offset) may overflow
+    bool offset_can_overflow_int = false;
+    switch (rc_predicate_mode) {
+      case rc_predicate_int_t: {
+          const TypeInt* offset_type = _igvn.type(offset)->isa_int();
+          jint lo = java_add(idx_type->_lo, offset_type->_lo);
+          jint hi = java_add(idx_type->_hi, offset_type->_hi);
+
+          if ((lo > hi) ||
+            ((idx_type->_lo & offset_type->_lo) < 0 && lo >= 0) ||
+            ((~(idx_type->_hi | offset_type->_hi)) < 0 && hi < 0)) {
+            offset_can_overflow_int = true; 
+          }
         }
-        overflow = true;
+        break;
+      case rc_predicate_long_low_up_rc_t:
+        /* no op */
+        break;
+      default:
+        ShouldNotReachHere();
+        break;
+    }
+
+    if (overflow || force_overflow || offset_can_overflow_int) {
+      // May overflow
+      if (!max_idx_expr->bottom_type()->isa_long()) {
+        max_idx_expr = new ConvI2LNode(max_idx_expr);
+        register_new_node(max_idx_expr, ctrl);
+      }
+      overflow = true;
+      if (overflow && !offset->bottom_type()->isa_long()) {
         offset = new ConvI2LNode(offset);
         register_new_node(offset, ctrl);
-        max_idx_expr = new AddLNode(max_idx_expr, offset);
-      } else {
-        // No overflow possible
-        max_idx_expr = new AddINode(max_idx_expr, offset);
       }
+      max_idx_expr = new AddLNode(max_idx_expr, offset);
     } else {
-      // Long RCE mode
-      if (max_idx_expr->bottom_type()->isa_int()) {
-          // We depends on this conversion when building final CmpNode
-          max_idx_expr = new ConvI2LNode(max_idx_expr);
-          register_new_node(max_idx_expr, ctrl);
-      }
-      Node *offset_long = NULL;
-      if (offset->bottom_type()->isa_int()) {
-        // This should not happen
-        offset_long = new ConvI2LNode(offset);
-        register_new_node(offset_long, ctrl);
-      } else {
-        offset_long = offset;
-      }
-      max_idx_expr = new AddLNode(max_idx_expr, offset_long);
-      auto add_overflow_check = new OverflowAddLNode(max_idx_expr, offset_long); // TODO Optimize ideal for Overflow add and subtract
-      register_new_node(add_overflow_check, ctrl);
-      auto add_overflow_test = new BoolNode(add_overflow_check, BoolTest::no_overflow);
-      
-      if (overflow_checks != NULL) {
-        // Previous overflow check exists so merge it
-        auto overflow_checks_int = overflow_checks->to_int(ctrl, &_igvn);
-        register_new_node(overflow_checks_int, ctrl);
-    
-        auto add_overflow_test_int = add_overflow_test->to_int(ctrl, &_igvn);
-        register_new_node(add_overflow_test_int, ctrl);
-
-        auto check = new AndINode(overflow_checks_int, add_overflow_test_int);
-        register_new_node(check, ctrl);
-        auto cmp = new CmpINode(check, _igvn.intcon(1));
-        register_new_node(cmp, ctrl);
-        overflow_checks = new BoolNode(check, BoolTest::eq);
-      } else {
-        overflow_checks = add_overflow_test;
-      }
-      register_new_node(overflow_checks, ctrl);
+      // No overflow possible
+      max_idx_expr = new AddINode(max_idx_expr, offset);
     }
     register_new_node(max_idx_expr, ctrl);
   }
 
   CmpNode* cmp = NULL;
-  if (!long_rce_mode) {
-    if (overflow) {
-      // Integer expressions may overflow, do long comparison
+  if (overflow || force_overflow) {
+    // Integer expressions may overflow, do long comparison
+    if (!range->bottom_type()->isa_long()) {
       range = new ConvI2LNode(range);
       register_new_node(range, ctrl);
-      cmp = new CmpULNode(max_idx_expr, range);
-    } else {
-      cmp = new CmpUNode(max_idx_expr, range);
     }
-  } else {
-    assert(max_idx_expr->bottom_type()->isa_long(), "should already be set to long");
+    if (!overflow) {
+      max_idx_expr = new ConvI2LNode(max_idx_expr);
+      register_new_node(max_idx_expr, ctrl);
+    }
     cmp = new CmpULNode(max_idx_expr, range);
+  } else {
+    cmp = new CmpUNode(max_idx_expr, range);
   }
 
   register_new_node(cmp, ctrl);
   BoolNode* bol = new BoolNode(cmp, BoolTest::lt);
   register_new_node(bol, ctrl);
-
-  if (long_rce_mode && overflow_checks != NULL) {
-    // Make final re-assembly
-    auto range_chk_int = bol->to_int(ctrl, &_igvn);
-    register_new_node(range_chk_int, ctrl);
-    auto overflow_checks_int = overflow_checks->to_int(ctrl, &_igvn);
-    register_new_node(overflow_checks_int, ctrl);
-
-    // In addition we have to check if overflow happened on runtime
-    auto final_check = new AndINode(range_chk_int, overflow_checks_int);
-    register_new_node(final_check, ctrl);
-    auto final_cmp = new CmpINode(final_check, _igvn.intcon(1));
-    register_new_node(final_cmp, ctrl);
-    bol = new BoolNode(final_cmp, BoolTest::eq);
-    register_new_node(bol, ctrl);
-  }
 
   if (TraceLoopPredicate) {
     predString->print_cr("<u range");
@@ -1244,7 +1246,7 @@ bool PhaseIdealLoop::loop_predication_impl_helper(IdealLoopTree *loop, ProjNode*
       loop->dump_head();
     }
 #endif
-  } else if (cl != NULL && loop->is_range_check_if(iff, this, invar, long_rce_mode) && (!long_rce_mode || loop->is_valid_for_long_rce(cl))) {
+  } else if (cl != NULL && loop->is_range_check_if(iff, this, invar, cl, long_rce_mode)) {
     // Range check for counted loops
     const Node*    cmp    = bol->in(1)->as_Cmp();
     Node*          idx    = cmp->in(1);
@@ -1286,8 +1288,11 @@ bool PhaseIdealLoop::loop_predication_impl_helper(IdealLoopTree *loop, ProjNode*
     // If predicate expressions may overflow in the integer range, longs are used.
     bool overflow = false;
 
+    // Determine way of inserting predicate
+    enum rc_predicate_mode_type rc_predicate_mode = long_rce_mode ? rc_predicate_long_low_up_rc_t : rc_predicate_int_t;
+
     // Test the lower bound
-    BoolNode* lower_bound_bol = rc_predicate(loop, ctrl, scale, offset, init, limit, stride, rng, false, overflow, long_rce_mode);
+    BoolNode* lower_bound_bol = rc_predicate(loop, ctrl, scale, offset, init, limit, stride, rng, false, overflow, rc_predicate_mode);
     // Negate test if necessary
     bool negated = false;
     if (proj->_con != predicate_proj->_con) {
@@ -1302,7 +1307,7 @@ bool PhaseIdealLoop::loop_predication_impl_helper(IdealLoopTree *loop, ProjNode*
     if (TraceLoopPredicate) tty->print_cr("lower bound check if: %s %d ", negated ? " negated" : "", lower_bound_iff->_idx);
 
     // Test the upper bound
-    BoolNode* upper_bound_bol = rc_predicate(loop, lower_bound_proj, scale, offset, init, limit, stride, rng, true, overflow, long_rce_mode);
+    BoolNode* upper_bound_bol = rc_predicate(loop, lower_bound_proj, scale, offset, init, limit, stride, rng, true, overflow, rc_predicate_mode);
     negated = false;
     if (proj->_con != predicate_proj->_con) {
       upper_bound_bol = new BoolNode(upper_bound_bol->in(1), upper_bound_bol->_test.negate());
@@ -1321,7 +1326,7 @@ bool PhaseIdealLoop::loop_predication_impl_helper(IdealLoopTree *loop, ProjNode*
     new_predicate_proj = upper_bound_proj;
 
     if (iff->is_RangeCheck()) {
-      new_predicate_proj = insert_initial_skeleton_predicate(iff, loop, proj, predicate_proj, upper_bound_proj, scale, offset, init, limit, stride, rng, overflow, long_rce_mode, reason);
+      new_predicate_proj = insert_initial_skeleton_predicate(iff, loop, proj, predicate_proj, upper_bound_proj, scale, offset, init, limit, stride, rng, overflow, rc_predicate_mode, reason);
     }
 
 #ifndef PRODUCT
@@ -1358,13 +1363,13 @@ ProjNode* PhaseIdealLoop::insert_initial_skeleton_predicate(IfNode* iff, IdealLo
                                                             int scale, Node* offset,
                                                             Node* init, Node* limit, jint stride,
                                                             Node* rng, bool &overflow,
-                                                            bool long_rce_mode,
+                                                            rc_predicate_mode_type rc_predicate_mode,
                                                             Deoptimization::DeoptReason reason) {
   // First predicate for the initial value on first loop iteration
   assert(proj->_con && predicate_proj->_con, "not a range check?");
   Node* opaque_init = new OpaqueLoopInitNode(C, init);
   register_new_node(opaque_init, upper_bound_proj);
-  BoolNode* bol = rc_predicate(loop, upper_bound_proj, scale, offset, opaque_init, limit, stride, rng, (stride > 0) != (scale > 0), overflow, long_rce_mode);
+  BoolNode* bol = rc_predicate(loop, upper_bound_proj, scale, offset, opaque_init, limit, stride, rng, (stride > 0) != (scale > 0), overflow, rc_predicate_mode);
   Node* opaque_bol = new Opaque4Node(C, bol, _igvn.intcon(1)); // This will go away once loop opts are over
   C->add_skeleton_predicate_opaq(opaque_bol);
   register_new_node(opaque_bol, upper_bound_proj);
@@ -1382,7 +1387,7 @@ ProjNode* PhaseIdealLoop::insert_initial_skeleton_predicate(IfNode* iff, IdealLo
   register_new_node(max_value, new_proj);
   max_value = new AddINode(opaque_init, max_value);
   register_new_node(max_value, new_proj);
-  bol = rc_predicate(loop, new_proj, scale, offset, max_value, limit, stride, rng, (stride > 0) != (scale > 0), overflow, long_rce_mode);
+  bol = rc_predicate(loop, new_proj, scale, offset, max_value, limit, stride, rng, (stride > 0) != (scale > 0), overflow, rc_predicate_mode);
   opaque_bol = new Opaque4Node(C, bol, _igvn.intcon(1));
   C->add_skeleton_predicate_opaq(opaque_bol);
   register_new_node(opaque_bol, new_proj);

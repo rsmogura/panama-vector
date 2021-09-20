@@ -737,10 +737,10 @@ public:
   bool policy_range_check( PhaseIdealLoop *phase ) const;
 
   // Return TRUE if "iff" is a range check.
-  bool is_range_check_if(IfNode *iff, PhaseIdealLoop *phase, Invariance& invar, bool& is_long_rce) const;
+  bool is_range_check_if(IfNode *iff, PhaseIdealLoop *phase, Invariance& invar, CountedLoopNode* cl, bool& is_long_rce) const;
 
   // Makes additionals checks to validate if RCE can be performed in case of long RCE
-  bool is_valid_for_long_rce(const CountedLoopNode* cl) const;
+  bool is_valid_for_long_rce(const CountedLoopNode* cl, jint scale, Node* range) const;
 
   // Estimate the number of nodes required when cloning a loop (body).
   uint est_loop_clone_sz(uint factor) const;
@@ -1300,11 +1300,22 @@ public:
   static ProjNode* find_predicate_insertion_point(Node* start_c, Deoptimization::DeoptReason reason);
   // Find a predicate
   static Node* find_predicate(Node* entry);
+
+  enum rc_predicate_mode_type {
+    /** The checks are against int comparisions (legacy way). */
+    rc_predicate_int_t,
+    /** This kind of checks is against the long RC, build on CpmUL, and with lower and upper bound.
+     * Because rc_predicate will know, that two bound are going to be installed, some optimizations
+     * can be performed.
+     */
+    rc_predicate_long_low_up_rc_t,
+  };
+
   // Construct a range check for a predicate if
   BoolNode* rc_predicate(IdealLoopTree *loop, Node* ctrl,
                          int scale, Node* offset,
                          Node* init, Node* limit, jint stride,
-                         Node* range, bool upper, bool &overflow, bool long_rce_mode = false);
+                         Node* range, bool upper, bool &overflow, enum rc_predicate_mode_type rc_predicate_mode);
 
   // Implementation of the loop predication to promote checks outside the loop
   bool loop_predication_impl(IdealLoopTree *loop);
@@ -1321,7 +1332,7 @@ public:
                                               int scale, Node* offset,
                                               Node* init, Node* limit, jint stride,
                                               Node* rng, bool& overflow,
-                                              bool long_rce_mode,
+                                              enum rc_predicate_mode_type rc_predicate_mode,
                                               Deoptimization::DeoptReason reason);
   Node* add_range_check_predicate(IdealLoopTree* loop, CountedLoopNode* cl,
                                   Node* predicate_proj, int scale_con, Node* offset,
