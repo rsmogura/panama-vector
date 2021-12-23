@@ -968,7 +968,8 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
 
   const bool is_mismatched_access = in_heap && (addr_type->isa_aryptr() == NULL);
 
-  const bool needs_cpu_membar = is_mixed_access || is_mismatched_access;
+  const bool needs_full_cpu_membar = is_mismatched_access;
+  const bool needs_aliased_slices_membar = !needs_full_cpu_membar && is_mixed_access;
 
   // Now handle special case where load/store happens from/to byte array but element type is not byte.
   bool using_byte_array = arr_type != NULL && arr_type->elem()->array_element_basic_type() == T_BYTE && elem_bt != T_BYTE;
@@ -1027,8 +1028,49 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
 
   const TypeInstPtr* vbox_type = TypeInstPtr::make_exact(TypePtr::NotNull, vbox_klass);
 
-  if (needs_cpu_membar) {
+  Node *mem_to_use; // TODO Add & use address alias idx to reduce recomputation of alias idx
+  Node *heap_addr; // TODO Add & use address alias idx to reduce recomputation of alias idx
+  const TypePtr* heap_type;
+
+  // TODO This does not cover all code paths, just fast prototype
+  if (needs_full_cpu_membar) {
     insert_mem_bar(Op_MemBarCPUOrder);
+  } else if (needs_aliased_slices_membar) {
+    // Put mem bar only on important slices
+    // Memory -----
+    //   |        |
+    //   |      Membar (CPU order)
+    //   |        |
+    //   |       Proj (mem)
+    //   |        |
+    //   |     ------------
+    //   |     |          |
+    //   **********************
+    //   * Bot  Raw       Ary *
+    //   *       Merge mem    *
+    //   **********************
+    heap_addr = basic_plus_adr(top(), base, offset);
+    heap_type = gvn().type(heap_addr)->isa_ptr();
+
+    MemBarNode* mb = MemBarNode::make(C, Op_MemBarCPUOrder, Compile::AliasIdxBot, NULL);
+    mb->init_req(TypeFunc::Control, control());
+    mb->init_req(TypeFunc::Memory,  map()->memory());
+
+    Node* membar = _gvn.transform(mb);
+    set_control(_gvn.transform(new ProjNode(membar, TypeFunc::Control)));
+    membar->dump(1);
+
+    // set_all_memory_call(membar);
+    Node* newmem = _gvn.transform( new ProjNode(membar, TypeFunc::Memory, false) );
+
+    mem_to_use = newmem;
+    set_all_memory(reset_memory());
+
+    // Fix memory - connected mem barriered memory to current memory
+    set_memory(newmem, heap_addr);
+    set_memory(newmem, addr_type);
+  } else {
+    mem_to_use = memory(addr);
   }
 
   if (is_store) {
@@ -1048,23 +1090,33 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
       val = gvn().transform(new VectorReinterpretNode(val, val->bottom_type()->is_vect(), to_vect_type));
     }
 
-    Node* vstore = gvn().transform(StoreVectorNode::make(0, control(), memory(addr), addr, addr_type, val, store_num_elem));
-    set_memory(vstore, addr_type);
+    Node* vstore = gvn().transform(StoreVectorNode::make(0, control(), mem_to_use, addr, addr_type, val, store_num_elem));
+    if (needs_aliased_slices_membar) {
+      // assert(heap_addr->adr_type()->isa_aryptr(), "Expect heap address"); // For vectors we require arrays here, but can be any oop
+      assert(addr_type->isa_rawptr(), "Expected raw ptr");
+      // TODO: Do we need this
+      // TODO: Can we set store to use bot memory (alias to everything) and skip post-store barriers?
+      set_memory(vstore, heap_addr);
+      set_memory(vstore, addr_type);
+    } else {
+      // Single memory slice or full barrier
+      set_memory(vstore, addr_type);
+    }
   } else {
     // When using byte array, we need to load as byte then reinterpret the value. Otherwise, do a simple vector load.
     Node* vload = NULL;
     if (using_byte_array) {
       int load_num_elem = num_elem * type2aelembytes(elem_bt);
-      vload = gvn().transform(LoadVectorNode::make(0, control(), memory(addr), addr, addr_type, load_num_elem, T_BYTE));
+      vload = gvn().transform(LoadVectorNode::make(0, control(), mem_to_use, addr, addr_type, load_num_elem, T_BYTE));
       const TypeVect* to_vect_type = TypeVect::make(elem_bt, num_elem);
       vload = gvn().transform(new VectorReinterpretNode(vload, vload->bottom_type()->is_vect(), to_vect_type));
     } else {
       // Special handle for masks
       if (is_mask) {
-        vload = gvn().transform(LoadVectorNode::make(0, control(), memory(addr), addr, addr_type, num_elem, T_BOOLEAN));
+        vload = gvn().transform(LoadVectorNode::make(0, control(), mem_to_use, addr, addr_type, num_elem, T_BOOLEAN));
         vload = gvn().transform(new VectorLoadMaskNode(vload, TypeVect::makemask(elem_bt, num_elem)));
       } else {
-        vload = gvn().transform(LoadVectorNode::make(0, control(), memory(addr), addr, addr_type, num_elem, elem_bt));
+        vload = gvn().transform(LoadVectorNode::make(0, control(), mem_to_use, addr, addr_type, num_elem, elem_bt));
       }
     }
     Node* box = box_vector(vload, vbox_type, elem_bt, num_elem);
@@ -1073,8 +1125,29 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
 
   old_map->destruct(&_gvn);
 
-  if (needs_cpu_membar) {
+  if (needs_full_cpu_membar) {
     insert_mem_bar(Op_MemBarCPUOrder);
+  } else if (needs_aliased_slices_membar) {
+    MemBarNode* mb = MemBarNode::make(C, Op_MemBarCPUOrder, Compile::AliasIdxBot, NULL);
+    mb->init_req(TypeFunc::Control, control());
+    mb->init_req(TypeFunc::Memory,  map()->memory());
+    mb->dump(1);
+
+
+    Node* membar = _gvn.transform(mb);
+    set_control(_gvn.transform(new ProjNode(membar, TypeFunc::Control)));
+
+    // set_all_memory_call(membar);
+    Node* newmem = _gvn.transform( new ProjNode(membar, TypeFunc::Memory, false) );
+
+    mem_to_use = newmem;
+    set_all_memory(reset_memory());
+
+    // Fix memory - connected mem barriered memory to current memory
+    set_memory(newmem, heap_addr);
+    set_memory(newmem, addr_type);
+  } else {
+    mem_to_use = memory(addr);
   }
 
   C->set_max_vector_size(MAX2(C->max_vector_size(), (uint)(num_elem * type2aelembytes(elem_bt))));
