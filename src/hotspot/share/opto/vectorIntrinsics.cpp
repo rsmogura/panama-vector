@@ -1013,7 +1013,21 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
 
   const bool is_mismatched_access = in_heap && (addr_type->isa_aryptr() == NULL);
 
-  const bool needs_cpu_membar = is_mixed_access || is_mismatched_access;
+  enum {no_barrier, aliases_only, full_barrier} needs_cpu_membar = no_barrier;
+  Node* heap_addr; // Used only with aliases_only barrier
+  Node* aliases_only_memory; // Used only with aliases_only barrier
+
+  if (is_mismatched_access) {
+    needs_cpu_membar = full_barrier;
+  } else if (is_mixed_access) {
+    // For aliases_only mode, find target aliases
+    Node* heap_addr = basic_plus_adr(top(), base, offset);
+
+    assert(addr_type->isa_rawptr(), "Basic address type should be raw, as it's mixed access and we extract heap address");
+    assert(gvn().type(heap_addr)->isa_oopptr(), "Should be heap address");
+
+    needs_cpu_membar = aliases_only;
+  }
 
   // Now handle special case where load/store happens from/to byte array but element type is not byte.
   bool using_byte_array = arr_type != NULL && arr_type->elem()->array_element_basic_type() == T_BYTE && elem_bt != T_BYTE;
@@ -1062,8 +1076,16 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
 
   const TypeInstPtr* vbox_type = TypeInstPtr::make_exact(TypePtr::NotNull, vbox_klass);
 
-  if (needs_cpu_membar) {
-    insert_mem_bar(Op_MemBarCPUOrder);
+  switch (needs_cpu_membar) {
+    case no_barrier:
+    break;
+
+    case aliases_only:
+      insert_cpu_mem_bar_on_aliases(aliases_only_memory, addr, heap_addr);
+    break;
+
+    case full_barrier:
+      insert_mem_bar(Op_MemBarCPUOrder);
   }
 
   if (is_store) {
@@ -1110,8 +1132,16 @@ bool LibraryCallKit::inline_vector_mem_operation(bool is_store) {
 
   old_map->destruct(&_gvn);
 
-  if (needs_cpu_membar) {
-    insert_mem_bar(Op_MemBarCPUOrder);
+  switch (needs_cpu_membar) {
+    case no_barrier:
+    break;
+
+    case aliases_only:
+      insert_cpu_mem_bar_on_aliases(aliases_only_memory, addr, heap_addr);
+    break;
+
+    case full_barrier:
+      insert_mem_bar(Op_MemBarCPUOrder);
   }
 
   C->set_max_vector_size(MAX2(C->max_vector_size(), (uint)(num_elem * type2aelembytes(elem_bt))));

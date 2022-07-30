@@ -820,6 +820,22 @@ class GraphKit : public Phase {
   // Helper functions to build synchronizations
   int next_monitor();
   Node* insert_mem_bar(int opcode, Node* precedent = NULL);
+  
+  // Inserts memory barrier on specified memory aliases, it has no sense to insert other barriers than CPU
+  // Memory -----
+    //   |        |
+    //   |      Membar (CPU order)
+    //   |        |
+    //   |       Proj (mem)
+    //   |        |
+    //   |     ------------
+    //   |     |          |
+    //   **********************
+    //   * Bot alias1  alias2 *
+    //   *      Merge mem     *
+    //   **********************
+  Node* insert_cpu_mem_bar_on_aliases(Node* &protected_mem, Node* address1, Node* address2);
+
   Node* insert_mem_bar_volatile(int opcode, int alias_idx, Node* precedent = NULL);
   // Optional 'precedent' is appended as an extra edge, to force ordering.
   FastLockNode* shared_lock(Node* obj);

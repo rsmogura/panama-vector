@@ -3472,6 +3472,25 @@ Node* GraphKit::insert_mem_bar(int opcode, Node* precedent) {
   return membar;
 }
 
+
+Node* GraphKit::insert_cpu_mem_bar_on_aliases(Node* &protected_mem, Node* address1, Node* address2) {
+  MemBarNode* mb = MemBarNode::make(C, Op_MemBarCPUOrder, Compile::AliasIdxBot, NULL);
+  mb->init_req(TypeFunc::Control, control());
+  mb->init_req(TypeFunc::Memory,  map()->memory());
+
+  Node* membar = _gvn.transform(mb);
+  set_control(_gvn.transform(new ProjNode(membar, TypeFunc::Control)));
+
+  protected_mem = _gvn.transform( new ProjNode(membar, TypeFunc::Memory, false) );
+
+  set_all_memory(reset_memory());
+  
+  set_memory(protected_mem, address1);
+  set_memory(protected_mem, address2);
+
+  return membar;
+}
+
 //-------------------------insert_mem_bar_volatile----------------------------
 // Memory barrier to avoid floating things around
 // The membar serves as a pinch point between both control and memory(alias_idx).
